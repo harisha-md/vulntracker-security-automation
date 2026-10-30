@@ -1,0 +1,28 @@
+replicaCount: 1
+
+image:
+  repository: vulntracker-api
+  tag: local
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8000
+
+ingress:
+  className: nginx
+  host: vulntracker.local
+
+externalSecret:
+  secretStoreName: aws-secrets-manager
+  remoteKey: /vulntracker/production
+  property: secret_key
+
+notifyServiceUrl: http://notify:3001
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

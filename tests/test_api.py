@@ -1,5 +1,7 @@
 import os
 import sys
+from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 from database import Base, get_db  # noqa: E402
+import main as main_module  # noqa: E402
 from main import app  # noqa: E402
 
 TEST_DB_URL = "sqlite:///./test_vulntracker.db"
@@ -30,9 +33,11 @@ client = TestClient(app, raise_server_exceptions=False)
 
 @pytest.fixture(autouse=True)
 def reset_db():
+    main_module.shared_scans.clear()
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
+    main_module.shared_scans.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +52,21 @@ def register_and_login(username="alice", email="alice@example.com", password="pa
 
 def auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
+
+
+def create_test_scan(token, title="Share test finding"):
+    response = client.post(
+        "/scans",
+        json={
+            "title": title,
+            "description": "Test finding details",
+            "severity": "high",
+            "affected_component": "test endpoint",
+        },
+        headers=auth_headers(token),
+    )
+    assert response.status_code == 201
+    return response.json()
 
 
 # ---------------------------------------------------------------------------
@@ -148,3 +168,103 @@ def test_delete_scan():
 
     resp = client.delete(f"/scans/{scan_id}", headers=auth_headers(token))
     assert resp.status_code == 204
+
+
+def test_share_link_returns_absolute_url_and_public_scan():
+    token = register_and_login()
+    scan = create_test_scan(token)
+
+    share_response = client.post(
+        f"/scans/{scan['id']}/share",
+        json={},
+        headers=auth_headers(token),
+    )
+
+    assert share_response.status_code == 200
+    share_url = share_response.json()["share_url"]
+    assert share_url.startswith("http://testserver/share/")
+
+    public_response = client.get(urlparse(share_url).path)
+    assert public_response.status_code == 200
+    assert public_response.json()["id"] == scan["id"]
+
+
+def test_password_protected_share_requires_and_checks_password():
+    token = register_and_login()
+    scan = create_test_scan(token)
+    share_response = client.post(
+        f"/scans/{scan['id']}/share",
+        json={"password": "stakeholder-password"},
+        headers=auth_headers(token),
+    )
+    share_path = urlparse(share_response.json()["share_url"]).path
+
+    assert client.get(share_path).status_code == 401
+    assert client.get(share_path, params={"password": "wrong"}).status_code == 401
+    valid_response = client.get(
+        share_path,
+        params={"password": "stakeholder-password"},
+    )
+    assert valid_response.status_code == 200
+    assert valid_response.json()["id"] == scan["id"]
+
+
+def test_share_link_expires_after_24_hours():
+    token = register_and_login()
+    scan = create_test_scan(token)
+    share_response = client.post(
+        f"/scans/{scan['id']}/share",
+        json={},
+        headers=auth_headers(token),
+    )
+    share_path = urlparse(share_response.json()["share_url"]).path
+    share_token = share_path.rsplit("/", 1)[-1]
+    main_module.shared_scans[share_token]["expires_at"] = (
+        datetime.utcnow() - timedelta(seconds=1)
+    )
+
+    assert client.get(share_path).status_code == 404
+
+
+def test_user_cannot_read_or_share_another_users_scan():
+    owner_token = register_and_login()
+    scan = create_test_scan(owner_token)
+    other_token = register_and_login(
+        username="bob",
+        email="bob@example.com",
+        password="password123",
+    )
+
+    get_response = client.get(
+        f"/scans/{scan['id']}",
+        headers=auth_headers(other_token),
+    )
+    share_response = client.post(
+        f"/scans/{scan['id']}/share",
+        json={},
+        headers=auth_headers(other_token),
+    )
+
+    assert get_response.status_code == 404
+    assert share_response.status_code == 404
+
+
+def test_search_returns_only_current_users_scans():
+    first_token = register_and_login()
+    create_test_scan(first_token, title="Private report Alpha")
+    second_token = register_and_login(
+        username="bob",
+        email="bob@example.com",
+        password="password123",
+    )
+    create_test_scan(second_token, title="Private report Beta")
+
+    response = client.get(
+        "/scans/search?q=Private",
+        headers=auth_headers(first_token),
+    )
+
+    assert response.status_code == 200
+    assert [item["title"] for item in response.json()["results"]] == [
+        "Private report Alpha"
+    ]

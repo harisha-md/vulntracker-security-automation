@@ -1,0 +1,57 @@
+{
+  "SchemaVersion": 2,
+  "Trivy": {
+    "Version": "0.76.1"
+  },
+  "ReportID": "01a18899-4453-7dcb-b62f-0de1dba66379",
+  "CreatedAt": "2026-10-29T22:28:28.307904+05:30",
+  "ArtifactName": "C:/Users/User/Projects/asa-assignment/helm/vulntracker",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "templates/deployment.yaml",
+      "Class": "config",
+      "Type": "helm",
+      "MisconfSummary": {
+        "Successes": 98,
+        "Failures": 0
+      }
+    },
+    {
+      "Target": "templates/externalsecret.yaml",
+      "Class": "config",
+      "Type": "helm",
+      "MisconfSummary": {
+        "Successes": 61,
+        "Failures": 0
+      }
+    },
+    {
+      "Target": "templates/ingress.yaml",
+      "Class": "config",
+      "Type": "helm",
+      "MisconfSummary": {
+        "Successes": 61,
+        "Failures": 0
+      }
+    },
+    {
+      "Target": "templates/networkpolicy.yaml",
+      "Class": "config",
+      "Type": "helm",
+      "MisconfSummary": {
+        "Successes": 61,
+        "Failures": 0
+      }
+    },
+    {
+      "Target": "templates/service.yaml",
+      "Class": "config",
+      "Type": "helm",
+      "MisconfSummary": {
+        "Successes": 62,
+        "Failures": 0
+      }
+    }
+  ]
+}

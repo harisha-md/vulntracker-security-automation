@@ -1,3 +1,4 @@
+
 from datetime import datetime
 
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
@@ -25,13 +26,17 @@ class ScanResult(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(200), nullable=False)
     description = Column(Text)
-    severity = Column(String(20), default="medium")   # critical | high | medium | low
-    status = Column(String(20), default="open")        # open | in_progress | resolved
+    severity = Column(String(20), default="medium")
+    status = Column(String(20), default="open")
     cve_id = Column(String(30), nullable=True)
     affected_component = Column(String(200), nullable=False)
     remediation_notes = Column(Text, nullable=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
 
     owner = relationship("User", back_populates="scans")

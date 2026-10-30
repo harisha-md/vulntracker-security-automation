@@ -75,6 +75,27 @@ cd notify
 npm test
 ```
 
+## Container and Helm Deployment
+
+Build the Python API image from the repository root:
+
+```bash
+docker build -t vulntracker-api:local .
+docker run --rm -p 8000:8000 -e SECRET_KEY=<long-random-secret> vulntracker-api:local
+```
+
+The image uses a pinned Python slim base, runs as a non-root user, and has a `/health` health check. For local use, the API database is SQLite inside the container; its data is discarded when the container is removed. Set `SECRET_KEY` to a long random value and do not commit it.
+
+The Helm chart is in `helm/vulntracker`. It expects the External Secrets Operator and a `ClusterSecretStore` named `aws-secrets-manager` already configured to read `/vulntracker/production` from AWS Secrets Manager. Build and push the image to a registry reachable by the cluster, then set the chart's image repository and tag before installing:
+
+```bash
+helm upgrade --install vulntracker helm/vulntracker \
+	--set image.repository=<registry>/vulntracker-api \
+	--set image.tag=<tag>
+```
+
+The chart exposes the API through an Ingress, limits pod ingress to the ingress controller namespace, and sets container resource limits and a non-root security context. Adjust the ingress host and namespace selector for your cluster.
+
 ---
 
 ## Your Tasks

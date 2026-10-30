@@ -1,10 +1,11 @@
+
 import logging
-import traceback
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import httpx
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -25,6 +26,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# In-memory storage for shared scan links.
+# Links expire after 24 hours.
+shared_scans = {}
+
 
 @app.middleware("http")
 async def cors_middleware(request: Request, call_next):
@@ -33,22 +38,19 @@ async def cors_middleware(request: Request, call_next):
     if origin:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = (
+            "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        )
         response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error("Unhandled exception on %s: %s", request.url, exc)
+    logger.exception("Unhandled exception on %s", request.url.path)
     return JSONResponse(
         status_code=500,
-        content={
-            "error": str(exc),
-            "type": type(exc).__name__,
-            "traceback": traceback.format_exc(),
-            "path": str(request.url),
-        },
+        content={"detail": "Internal server error"},
     )
 
 
@@ -91,6 +93,10 @@ class ScanUpdate(BaseModel):
     remediation_notes: Optional[str] = None
 
 
+class ShareRequest(BaseModel):
+    password: Optional[str] = None
+
+
 class ScanOut(BaseModel):
     id: int
     title: str
@@ -128,10 +134,16 @@ def _fire_notify(event: str, payload: dict) -> None:
 
 @app.post("/auth/register", response_model=UserOut, status_code=201)
 def register(payload: UserRegister, db: Session = Depends(get_db)):
-    if db.query(models.User).filter(models.User.username == payload.username).first():
+    if db.query(models.User).filter(
+        models.User.username == payload.username
+    ).first():
         raise HTTPException(status_code=400, detail="Username already registered")
-    if db.query(models.User).filter(models.User.email == payload.email).first():
+
+    if db.query(models.User).filter(
+        models.User.email == payload.email
+    ).first():
         raise HTTPException(status_code=400, detail="Email already registered")
+
     user = models.User(
         username=payload.username,
         email=payload.email,
@@ -145,15 +157,24 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
 
 @app.post("/auth/login")
 def login(payload: UserLogin, db: Session = Depends(get_db)):
-    logger.info("Login attempt — username: %s password: %s", payload.username, payload.password)
-    user = db.query(models.User).filter(models.User.username == payload.username).first()
-    if not user or not verify_password(payload.password, user.hashed_password):
+    logger.info("Login attempt for username: %s", payload.username)
+
+    user = db.query(models.User).filter(
+        models.User.username == payload.username
+    ).first()
+
+    if not user or not verify_password(
+        payload.password, user.hashed_password
+    ):
         logger.warning(
-            "Failed login — username: '%s' password: '%s'",
+            "Failed login for username: '%s'",
             payload.username,
-            payload.password,
         )
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect username or password",
+        )
+
     token = create_access_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
@@ -186,17 +207,29 @@ def create_scan(
     current_user: models.User = Depends(get_current_user),
 ):
     if payload.severity not in ("critical", "high", "medium", "low"):
-        raise HTTPException(status_code=400, detail="severity must be critical | high | medium | low")
-    scan = models.ScanResult(**payload.model_dump(), owner_id=current_user.id)
+        raise HTTPException(
+            status_code=400,
+            detail="severity must be critical | high | medium | low",
+        )
+
+    scan = models.ScanResult(
+        **payload.model_dump(),
+        owner_id=current_user.id,
+    )
     db.add(scan)
     db.commit()
     db.refresh(scan)
-    background_tasks.add_task(_fire_notify, "scan.created", {
-        "id": scan.id,
-        "title": scan.title,
-        "severity": scan.severity,
-        "owner": current_user.username,
-    })
+
+    background_tasks.add_task(
+        _fire_notify,
+        "scan.created",
+        {
+            "id": scan.id,
+            "title": scan.title,
+            "severity": scan.severity,
+            "owner": current_user.username,
+        },
+    )
     return scan
 
 
@@ -207,8 +240,12 @@ def search_scans(
     current_user: models.User = Depends(get_current_user),
 ):
     if not q or len(q) < 2:
-        raise HTTPException(status_code=400, detail="Search query must be at least 2 characters")
-    results = search_scans_by_query(db, q)
+        raise HTTPException(
+            status_code=400,
+            detail="Search query must be at least 2 characters",
+        )
+
+    results = search_scans_by_query(db, q, current_user.id)
     return {"results": results, "count": len(results)}
 
 
@@ -218,9 +255,14 @@ def get_scan(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    scan = db.query(models.ScanResult).filter(models.ScanResult.id == scan_id).first()
+    scan = db.query(models.ScanResult).filter(
+        models.ScanResult.id == scan_id,
+        models.ScanResult.owner_id == current_user.id,
+    ).first()
+
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+
     return scan
 
 
@@ -236,23 +278,35 @@ def update_scan(
         models.ScanResult.id == scan_id,
         models.ScanResult.owner_id == current_user.id,
     ).first()
+
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+
     if payload.status is not None:
         if payload.status not in ("open", "in_progress", "resolved"):
-            raise HTTPException(status_code=400, detail="status must be open | in_progress | resolved")
+            raise HTTPException(
+                status_code=400,
+                detail="status must be open | in_progress | resolved",
+            )
         scan.status = payload.status
+
     if payload.remediation_notes is not None:
         scan.remediation_notes = payload.remediation_notes
+
     scan.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(scan)
-    background_tasks.add_task(_fire_notify, "scan.updated", {
-        "id": scan.id,
-        "title": scan.title,
-        "status": scan.status,
-        "owner": current_user.username,
-    })
+
+    background_tasks.add_task(
+        _fire_notify,
+        "scan.updated",
+        {
+            "id": scan.id,
+            "title": scan.title,
+            "status": scan.status,
+            "owner": current_user.username,
+        },
+    )
     return scan
 
 
@@ -266,10 +320,93 @@ def delete_scan(
         models.ScanResult.id == scan_id,
         models.ScanResult.owner_id == current_user.id,
     ).first()
+
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+
     db.delete(scan)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Shared scan routes - Task 1
+# ---------------------------------------------------------------------------
+
+@app.post("/scans/{scan_id}/share")
+def create_share_link(
+    scan_id: int,
+    payload: ShareRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    scan = db.query(models.ScanResult).filter(
+        models.ScanResult.id == scan_id,
+        models.ScanResult.owner_id == current_user.id,
+    ).first()
+
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    token = secrets.token_urlsafe(32)
+
+    password_hash = None
+    if payload.password:
+        password_hash = get_password_hash(payload.password)
+
+    shared_scans[token] = {
+        "scan_id": scan.id,
+        "owner_id": current_user.id,
+        "expires_at": datetime.utcnow() + timedelta(hours=24),
+        "password_hash": password_hash,
+    }
+
+    return {"share_url": str(request.url_for("get_shared_scan", token=token))}
+
+
+@app.get("/share/{token}", response_model=ScanOut)
+def get_shared_scan(
+    token: str,
+    password: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    share = shared_scans.get(token)
+
+    if not share:
+        raise HTTPException(
+            status_code=404,
+            detail="Share link not found or expired",
+        )
+
+    if datetime.utcnow() >= share["expires_at"]:
+        shared_scans.pop(token, None)
+        raise HTTPException(
+            status_code=404,
+            detail="Share link not found or expired",
+        )
+
+    if share["password_hash"] is not None:
+        if password is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Password required",
+            )
+
+        if not verify_password(password, share["password_hash"]):
+            raise HTTPException(
+                status_code=401,
+                detail="Incorrect password",
+            )
+
+    scan = db.query(models.ScanResult).filter(
+        models.ScanResult.id == share["scan_id"],
+        models.ScanResult.owner_id == share["owner_id"],
+    ).first()
+
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    return scan
 
 
 # ---------------------------------------------------------------------------

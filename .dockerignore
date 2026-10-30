@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.db
+*.sqlite3
+.pytest_cache
+node_modules
+reports
+# Exclude virtual environments and installed dependencies at every level
+**/.venv
+**/venv
+**/env
+**/node_modules

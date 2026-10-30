@@ -1,0 +1,6 @@
+apiVersion: v2
+name: vulntracker
+description: FastAPI vulnerability tracker deployment
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
